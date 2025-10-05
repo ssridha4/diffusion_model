@@ -128,11 +128,16 @@ class TestDiffusion(unittest.TestCase):
     @weight(1)
     def test_07_q_sample(self):
         for ind, curr_dict in enumerate(final_save_dict["q_sample"]):
+            # print(curr_dict)
             x_start = curr_dict["x_start"]
             t = curr_dict["t"]
             noise = curr_dict["noise"]
             expected_res = curr_dict["expected_res"]
+            # print(x_start.shape, t.shape, noise.shape)
+            # print(expected_res.shape)
+            # print("expected_res: ", expected_res)
             res = diffusion_test.q_sample(x_start, t, noise)
+            # print("res: ", res)
             torch.testing.assert_close(expected_res, res, atol=1e-4, rtol=1e-4)
 
 if __name__ == "__main__":

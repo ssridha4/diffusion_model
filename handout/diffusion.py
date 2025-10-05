@@ -42,7 +42,10 @@ def cosine_schedule(timesteps, s=0.008):
     alphas_cumprod = torch.cos(((x / steps) + s) / (1 + s) * torch.pi * 0.5) ** 2
     alphas_cumprod = alphas_cumprod / alphas_cumprod[0]
     alphas = alphas_cumprod[1:] / alphas_cumprod[:-1]
-    return torch.clip(alphas, 0.001, 1)
+    print("timesteps: ", timesteps)
+    print("alphas_cumprod: ", alphas_cumprod.shape)
+    print("alphas: ", alphas.shape)
+    return alphas_cumprod, torch.clip(alphas, 0.001, 1)
 
 
 # normalization functions
@@ -82,6 +85,27 @@ class Diffusion(nn.Module):
         # Hint: helpful to define both alpha_bar and alpha_bar_t_minus_1
         # Hint: at t = 0, alpha_bar = 1
 
+        # s = 0.008
+        # T = self.num_timesteps + 1
+        # t_vals = torch.arange(T, dtype=torch.float32)
+        # arr = ((t_vals / T + s) / (1 + s)) * torch.pi * 0.5
+        # f_t = torch.cos(arr) ** 2
+
+        # alpha_bar = f_t / f_t[0]
+        # self.alpha_bar = alpha_bar
+        # self.alpha_bar_t_minus_1 = torch.cat([torch.tensor([1.0]), alpha_bar[:-1]])
+
+        alpha_bar, alphas = cosine_schedule(self.num_timesteps)
+
+        self.alpha_bar = alpha_bar
+        self.alphas = alphas
+
+        self.alpha_bar_t_minus_1 = torch.cat([torch.tensor([1.0]), alpha_bar[:-1]])
+
+        self.sqrt_alpha_bar = torch.sqrt(alpha_bar)
+        self.sqrt_one_minus_alpha_bar = torch.sqrt(1 - alpha_bar)
+        # self.posterior_variance = alphas * (1 - alpha_bars[:-1]) / (1 - alpha_bars[1:])
+
         # ###########################################################
 
     def noise_like(self, shape, device):
@@ -114,14 +138,28 @@ class Diffusion(nn.Module):
         # Hint: use extract function to get the coefficients at time t
         # Hint: use self.noise_like function to generate noise. DO NOT USE torch.randn
         # Begin code here
-        ...
-        ...
-        ...
-        
+
+        z = self.noise_like(x.shape, device=x.device)
+        predicted_noise = self.model(x, t)
+
+        alpha_t = extract(self.alphas, t, x.shape)
+        alpha_bar_t = extract(self.alpha_bar, t+1, x.shape)
+        alpha_bar_t_minus_1 = extract(self.alpha_bar_t_minus_1, t+1, x.shape)
+
+        x_0 = (x - torch.sqrt(1 - alpha_bar_t) * predicted_noise) / torch.sqrt(alpha_bar_t)
+        x_0 = torch.clamp(x_0, -1.0, 1.0)
+
+        posterior_mean = (
+            torch.sqrt(alpha_bar_t_minus_1) * (1 - alpha_t) / (1 - alpha_bar_t) * x_0 +
+            torch.sqrt(alpha_t) * (1 - alpha_bar_t_minus_1) / (1 - alpha_bar_t) * x
+        )
+
         if t_index == 0:
-            return ...
+            return posterior_mean
         else:
-            return ...
+            posterior_variance = ((1 - alpha_bar_t_minus_1) / (1 - alpha_bar_t)) * (1 - alpha_t)
+            return posterior_mean + torch.sqrt(posterior_variance) * z
+
         # ####################################################
 
     @torch.no_grad()
@@ -140,6 +178,13 @@ class Diffusion(nn.Module):
         # 2. inside the loop, sample x_{t-1} from the reverse diffusion process
         # 3. clamp and unnormalize the generated image to valid pixel range
         # Hint: to get time index, you can use torch.full()
+        for t_index in range(self.num_timesteps - 1, -1, -1):
+            t = torch.full((b,), t_index, device=img.device)
+            img = self.p_sample(img, t, t_index)
+        
+        img = torch.clamp(img, -1.0, 1.0)
+        img = unnormalize_to_zero_to_one(img)
+
         return img
         # ####################################################
 
@@ -155,7 +200,9 @@ class Diffusion(nn.Module):
         self.model.eval()
         #### TODO: Implement the sample function ####
         # Hint: use self.noise_like function to generate noise. DO NOT USE torch.randn
-        img = ...
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        img = self.noise_like((batch_size, self.channels, self.image_size, self.image_size), device=device)
+        img = self.p_sample_loop(img)
         return img
 
     # forward diffusion
@@ -171,8 +218,13 @@ class Diffusion(nn.Module):
             The sampled images.
         """
         ###### TODO: Implement the q_sample function #######
-        x_t = ...
+
+        sqrt_one_minus_alpha_bar_t = extract(self.sqrt_one_minus_alpha_bar, t, noise.shape)
+        sqrt_alpha_bar_t = extract(self.sqrt_alpha_bar, t, x_0.shape)
+
+        x_t = sqrt_alpha_bar_t * x_0 + sqrt_one_minus_alpha_bar_t * noise
         return x_t
+
 
     def p_losses(self, x_0, t, noise):
         """
@@ -187,7 +239,8 @@ class Diffusion(nn.Module):
         ###### TODO: Implement the p_losses function #######
         # define loss function wrt. the model output and the target
         # Hint: you can use pytorch built-in loss functions: F.l1_loss
-        loss = ...
+        x_t = self.q_sample(x_0, t, noise)
+        loss = F.l1_loss(self.model(x_t, t-1), noise)
 
         return loss
         # ####################################################
@@ -204,5 +257,6 @@ class Diffusion(nn.Module):
         b, c, h, w, device, img_size, = *x_0.shape, x_0.device, self.image_size
         assert h == img_size and w == img_size, f'height and width of image must be {img_size}'
         ###### TODO: Implement the forward function #######
-        t = torch.randint(...)
-        return ...
+        t = torch.randint(0, self.num_timesteps, (b,), device=device, dtype=torch.long)
+
+        return self.p_losses(x_0, t, noise)
